@@ -1,23 +1,25 @@
+from functools import partial
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import trunc_normal_, DropPath
 
-from .modules.gcc_cvx_modules import gcc_cvx_Block, gcc_cvx_Block_2stage, Block, LayerNorm, gcc_Conv2d
-
 from mmcv_custom import load_checkpoint
 from mmseg.utils import get_root_logger
 from mmseg.models.builder import BACKBONES
 
+from .modules.gcc_cvx_modules import gcc_cvx_Block, gcc_cvx_Block_2stage, Block, LayerNorm, gcc_Conv2d
 @BACKBONES.register_module()
-class ConvNeXt_cvx_gcc(nn.Module):
-    def __init__(self, in_chans=3, num_classes=1000, 
+class ConvNeXt_gcc_cvx(nn.Module):
+    def __init__(self, in_chans=3,
                  depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], drop_path_rate=0., 
-                 layer_scale_init_value=1e-6, head_init_scale=1.,
-                 gcc_stage=1, block_replace_mode="last_1/3"
+                 layer_scale_init_value=1e-6,
+                 gcc_stage=1, block_replace_mode="last_1/3",
+                 out_indices=[0, 1, 2, 3],
                  ):
         super().__init__()
-        # super(ConvNeXt_cvx_gcc, self).__init__()
+        # super(ConvNeXt_gcc_cvx, self).__init__()
 
         self.downsample_layers = nn.ModuleList() # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
@@ -48,9 +50,9 @@ class ConvNeXt_cvx_gcc(nn.Module):
                     lo = 2*depths[i]//3 # e.g. in stage3, j+1=7 > lo=2*9//3=6, so block 678 is gcc_block, while block 0-5 is normal
                 elif block_replace_mode == "last_2/3": # here we use gcc in the last 2/3 blocks
                     lo = depths[i]//3 # e.g. in stage3, j+1=4 > lo=9//3=3, so block 4-8 is gcc_block, while block 0-3 is normal
-                stage = nn.Sequential(*[    
+                stage = nn.Sequential(*[ # enable interpolation for multi-scale resolution
                     gcc_Block(dim=dims[i], drop_path=dp_rates[cur + j], layer_scale_init_value=layer_scale_init_value,
-                        meta_kernel_size=stages_fs[i], instance_kernel_method=None, use_pe=True) \
+                        meta_kernel_size=stages_fs[i], instance_kernel_method="interpolation_bilinear", use_pe=True) \
                     if lo < j+1 else \
                     Block(dim=dims[i], drop_path=dp_rates[cur + j], layer_scale_init_value=layer_scale_init_value) \
                     for j in range(depths[i])
@@ -58,12 +60,15 @@ class ConvNeXt_cvx_gcc(nn.Module):
             self.stages.append(stage)
             cur += depths[i]
 
-        self.norm = nn.LayerNorm(dims[-1], eps=1e-6) # final norm layer
-        self.head = nn.Linear(dims[-1], num_classes)
+        self.out_indices = out_indices
+
+        norm_layer = partial(LayerNorm, eps=1e-6, data_format="channels_first")
+        for i_layer in range(4):
+            layer = norm_layer(dims[i_layer])
+            layer_name = f'norm{i_layer}'
+            self.add_module(layer_name, layer)
 
         self.apply(self._init_weights)
-        self.head.weight.data.mul_(head_init_scale)
-        self.head.bias.data.mul_(head_init_scale)
 
     def _init_weights(self, m):
         if isinstance(m, (nn.Conv2d, nn.Linear)):
@@ -80,11 +85,10 @@ class ConvNeXt_cvx_gcc(nn.Module):
         """
 
         def _init_weights(m):
-            if isinstance(m, (nn.Conv2d, nn.Linear)):
+            if isinstance(m, nn.Linear):
                 trunc_normal_(m.weight, std=.02)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, gcc_Conv2d):
-                m.gcc_init()    # convnext like initialization is used for gcc as well
+                if isinstance(m, nn.Linear) and m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
@@ -99,12 +103,17 @@ class ConvNeXt_cvx_gcc(nn.Module):
             raise TypeError('pretrained must be a str or None')
 
     def forward_features(self, x):
+        outs = []
         for i in range(4):
             x = self.downsample_layers[i](x)
             x = self.stages[i](x)
-        return self.norm(x.mean([-2, -1])) # global average pooling, (N, C, H, W) -> (N, C)
+            if i in self.out_indices:
+                norm_layer = getattr(self, f'norm{i}')
+                x_out = norm_layer(x)
+                outs.append(x_out)
+
+        return tuple(outs)
 
     def forward(self, x):
         x = self.forward_features(x)
-        x = self.head(x)
         return x
