@@ -17,7 +17,7 @@ from mmseg.datasets import build_dataset
 from mmseg.models import build_segmentor
 from mmseg.utils import collect_env, get_root_logger
 
-from backbone import beit
+from backbone import *
 
 
 def parse_args():
