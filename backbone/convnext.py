@@ -18,7 +18,7 @@ from mmseg.utils import get_root_logger
 from mmseg.models.builder import BACKBONES
 
 @BACKBONES.register_module()
-class ConvNeXt(nn.Module):
+class _ConvNeXt(nn.Module):
     r""" ConvNeXt
         A PyTorch impl of : `A ConvNet for the 2020s`  -
           https://arxiv.org/pdf/2201.03545.pdf

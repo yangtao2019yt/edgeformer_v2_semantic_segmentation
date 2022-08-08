@@ -10,7 +10,7 @@ from mmseg.utils import get_root_logger
 from mmseg.models.builder import BACKBONES
 
 @BACKBONES.register_module()
-class ConvNeXt_GCC(nn.Module):
+class _ConvNeXt_GCC(nn.Module):
     def __init__(self, in_chans=3,
                  depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], drop_path_rate=0., 
                  layer_scale_init_value=1e-6,
